@@ -64,3 +64,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+replace github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0 => github.com/Alma0010/REALITY v0.0.0-20261030201418-167dfca01cf1

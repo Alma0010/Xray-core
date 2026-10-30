@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +36,8 @@ type Server struct {
 	closeOnce      sync.Once
 	debounce       time.Duration
 	paddingScheme  string
+	rejectHTTP     bool
+	authSlots      chan struct{}
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
@@ -49,6 +50,10 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		pendingAdds:    make(map[string]*protocol.MemoryUser),
 		pendingRemoves: make(map[string]struct{}),
 		paddingScheme:  config.PaddingScheme,
+		rejectHTTP:     config.RejectHttp,
+	}
+	if s.rejectHTTP {
+		s.authSlots = make(chan struct{}, 128)
 	}
 	users := make(map[[32]byte]*protocol.MemoryUser)
 	emailIndex := make(map[string][32]byte)
@@ -81,8 +86,25 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
+	if s.rejectHTTP {
+		select {
+		case s.authSlots <- struct{}{}:
+		default:
+			return errors.New("anytls: authentication limit reached")
+		}
+	}
+	var released bool
+	releaseAuth := func() {
+		if s.rejectHTTP && !released {
+			<-s.authSlots
+			released = true
+		}
+	}
+	defer releaseAuth()
 	sessPol := s.policyManager.ForLevel(0)
 	_ = conn.SetReadDeadline(time.Now().Add(sessPol.Timeouts.Handshake))
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	sess := &session{
 		isClient:       false,
@@ -100,8 +122,18 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 
 	// auth header: 32B sha256(password) + 2B padlen
 	var h [34]byte
-	if _, err := io.ReadFull(sess.br, h[:]); err != nil {
-		return errors.New("anytls: read auth").Base(err)
+	n := 0
+	for n < len(h) {
+		count, err := sess.br.Read(h[n:])
+		n += count
+		// Short HTTP requests can finish before 34 bytes. Never mistake a
+		// fragmented, valid password hash for HTTP, even if its prefix matches.
+		if s.rejectHTTP && n < len(h) && completeShortHTTP(h[:n]) && !s.matchesUserPrefix(h[:n]) {
+			return rejectHTTP(conn, sess.br, h[:n])
+		}
+		if err != nil {
+			return errors.New("anytls: read auth").Base(err)
+		}
 	}
 
 	var sum [32]byte
@@ -109,6 +141,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	snap := s.loadStore()
 	user := snap.users[sum]
 	if user == nil {
+		if s.rejectHTTP && looksLikeHTTP(h[:]) {
+			return rejectHTTP(conn, sess.br, h[:])
+		}
 		authErr := errors.New("anytls: invalid user")
 		log.Record(&log.AccessMessage{From: conn.RemoteAddr(), Status: log.AccessRejected, Reason: authErr})
 		return authErr
@@ -123,6 +158,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
+	releaseAuth()
 
 	inb := sessionctx.InboundFromContext(ctx)
 	inb.Name = protocolName

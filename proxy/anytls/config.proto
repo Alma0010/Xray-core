@@ -18,6 +18,8 @@ message ServerConfig {
   repeated xray.common.protocol.User users = 1;
   // optional server padding scheme string
   string padding_scheme = 2;
+  // Reply to unauthenticated HTTP/1.x requests with a built-in nginx-style 404.
+  bool reject_http = 3;
 }
 
 message ClientConfig {

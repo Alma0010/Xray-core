@@ -22,11 +22,13 @@ type AnyTLSServerConfig struct {
 	Users []*AnyTLSUser `json:"users"`
 	// Easier authoring: accept padding scheme as lines and join internally
 	PaddingScheme []string `json:"paddingScheme"`
+	RejectHTTP    bool     `json:"rejectHTTP"`
 }
 
 func (c *AnyTLSServerConfig) Build() (proto.Message, error) {
 	cfg := &anytls.ServerConfig{
-		Users: make([]*protocol.User, 0, len(c.Users)),
+		Users:      make([]*protocol.User, 0, len(c.Users)),
+		RejectHttp: c.RejectHTTP,
 	}
 	if len(c.PaddingScheme) > 0 {
 		cfg.PaddingScheme = strings.Join(c.PaddingScheme, "\n")
